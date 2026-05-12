@@ -47,3 +47,8 @@ output
 
 # review channel artifacts
 .review/
+
+# Win25H2Safe-Tests.ps1 output artifacts
+Win25H2Safe-Tests.results.txt
+Win25H2Safe-Tests.results.json
+Win25H2Safe-Tests.cargo.log
