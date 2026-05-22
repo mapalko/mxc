@@ -72,7 +72,7 @@ use crate::base_container_runner::BaseContainerRunner;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
 use wxc_common::error::WxcError;
 use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
-use wxc_common::models::ExecutionRequest;
+use wxc_common::models::{ExecutionRequest, FilesystemOverlayMode};
 use wxc_common::sandbox_process::Runner;
 use wxc_common::script_runner::ScriptRunner;
 
@@ -275,7 +275,13 @@ fn build_t3_dacl(
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
 pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
-    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true)?;
+    let overlay_mode = request
+        .experimental
+        .filesystem_overlay
+        .as_ref()
+        .map(|cfg| cfg.mode)
+        .unwrap_or(FilesystemOverlayMode::Off);
+    let decision = fallback_detector::detect(&request.policy, /*prefer_bc=*/ true, overlay_mode)?;
 
     let (runner, dacl_manager): (Box<dyn ScriptRunner>, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
