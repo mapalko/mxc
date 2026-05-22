@@ -33,6 +33,8 @@ members = [
     "testing/wxc_ui_probe",
     "tools/mxc_diagnostic_console",
     "tools/mxc_schema_gen",
+    "tools/wxc_projfs_probe",
+    "tools/wxc_projfs_probe_child",
     "mxc_telemetry",
 ]
 exclude = ["testing/fuzz"]
@@ -88,6 +90,7 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemServices",
     "Win32_System_SystemInformation",
     "Win32_System_JobObjects",
+    "Win32_Storage_ProjectedFileSystem",
 ] }
 windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
