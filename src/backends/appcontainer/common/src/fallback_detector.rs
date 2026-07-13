@@ -833,7 +833,8 @@ mod tests {
             std::env::set_var("MXC_FORCE_DENY_PATHS", "1");
         }
         let policy = policy_with_denied();
-        let d = detect(&policy, true).expect("native deny support keeps T1");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("native deny support keeps T1");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -861,7 +862,8 @@ mod tests {
             .denied_paths
             .push(dir.path().to_string_lossy().into_owned());
         policy.fallback.allow_dacl_mutation = true;
-        let d = detect(&policy, true).expect("falls through to a DACL tier");
+        let d = detect(&policy, true, FilesystemOverlayMode::Off)
+            .expect("falls through to a DACL tier");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -1034,14 +1036,16 @@ mod tests {
         // Symbol may be present, but capability disabled: detection must drop
         // to Tier 3 rather than pick a BaseContainer that cannot launch.
         let _g = BcUsableGuard::set(false);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy(), true, FilesystemOverlayMode::Off)
+            .expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
     }
 
     #[test]
     fn detect_selects_tier1_when_bc_usable() {
         let _g = BcUsableGuard::set(true);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy(), true, FilesystemOverlayMode::Off)
+            .expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
     }
 
