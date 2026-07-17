@@ -35,12 +35,12 @@ const MAX_CAPTURED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 /// Grace added to the guest's own `timeout_ms` to form the host watchdog
 /// deadline: covers guest process teardown and final output drain. If the guest
 /// freezes and never reports, the host stops waiting after `timeout_ms + grace`.
-const HOST_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
+pub const HOST_WATCHDOG_GRACE: Duration = Duration::from_secs(30);
 
 /// Host watchdog deadline for one guest execution. `None` for an infinite guest
 /// budget (`u32::MAX`, the normalized "no timeout"); otherwise `timeout_ms +
 /// grace`, saturating against overflow.
-fn host_watchdog_deadline(timeout_ms: u32, grace: Duration) -> Option<Duration> {
+pub fn host_watchdog_deadline(timeout_ms: u32, grace: Duration) -> Option<Duration> {
     if timeout_ms == u32::MAX {
         None
     } else {

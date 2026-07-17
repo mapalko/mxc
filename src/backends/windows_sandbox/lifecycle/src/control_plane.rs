@@ -18,6 +18,18 @@ pub use os::*;
 /// incompatibly; readers reject mismatches via [`check_schema`].
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
 
+/// IPC wire-protocol version: the line protocol (`PING`/`STOP`/`EXEC`) plus the
+/// [`crate::ipc_exec`] frame format. Bump on any incompatible framing change so
+/// a daemon left by a *different* mxc install is refused rather than driven
+/// against a mismatched peer. Versioned separately from [`RECORD_SCHEMA_VERSION`]
+/// (the on-disk shape), which it need not track.
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
+/// Daemon exit code signalling it could not acquire the host's single VM slot
+/// (busy); `start` maps it to `backend_unavailable`. Outside the `0`/`1`
+/// success/failure range so it is unambiguous (`75` == sysexits `EX_TEMPFAIL`).
+pub const DAEMON_EXIT_VM_SLOT_BUSY: i32 = 75;
+
 /// Lifecycle state of a provisioned state-aware sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,9 +105,22 @@ pub struct DaemonRecord {
     pub active_sandbox_id: String,
     /// `false` while the daemon is booting; `true` once the VM is ready.
     pub ready: bool,
+    /// IPC wire-protocol version this daemon speaks (see [`IPC_PROTOCOL_VERSION`]).
+    /// Absent (pre-versioning) records default to `0`, i.e. incompatible.
+    #[serde(default)]
+    pub protocol_version: u32,
     /// Positive ownership proof for reclaiming an orphaned VM.
     #[serde(default)]
     pub vm_processes: Vec<VmProcId>,
+}
+
+impl DaemonRecord {
+    /// True iff this daemon speaks this build's IPC wire protocol
+    /// ([`IPC_PROTOCOL_VERSION`]). A mismatch means a different mxc install left
+    /// it: it authenticates but must not be driven with mismatched framing.
+    pub fn protocol_compatible(&self) -> bool {
+        self.protocol_version == IPC_PROTOCOL_VERSION
+    }
 }
 
 /// Startup action for an already-running VM.
@@ -579,6 +604,7 @@ mod tests {
             nonce: "abc123".to_string(),
             active_sandbox_id: "wsb:deadbeef".to_string(),
             ready: true,
+            protocol_version: IPC_PROTOCOL_VERSION,
             vm_processes: vec![VmProcId {
                 pid: 5678,
                 creation_time: 99,
@@ -587,6 +613,38 @@ mod tests {
         atomic_write_json(&path, &rec).unwrap();
         let back: DaemonRecord = read_json(&path).unwrap().unwrap();
         assert_eq!(back, rec);
+    }
+
+    #[test]
+    fn protocol_compatible_matches_current_and_rejects_others() {
+        let mut rec = daemon_record_with(Vec::new());
+        assert_eq!(rec.protocol_version, IPC_PROTOCOL_VERSION);
+        assert!(rec.protocol_compatible());
+
+        rec.protocol_version = 0;
+        assert!(!rec.protocol_compatible());
+        rec.protocol_version = IPC_PROTOCOL_VERSION + 1;
+        assert!(!rec.protocol_compatible());
+    }
+
+    #[test]
+    fn daemon_record_without_protocol_version_reads_incompatible() {
+        // A record serialised by a pre-versioning daemon has no
+        // `protocol_version` key. It must still deserialise (serde default) and
+        // read back as protocol-incompatible rather than erroring or matching.
+        let json = r#"{
+            "schema_version": 1,
+            "pid": 1,
+            "pid_creation_time": 1,
+            "ipc_port": 1,
+            "nonce": "n",
+            "active_sandbox_id": "wsb:x",
+            "ready": true
+        }"#;
+        let rec: DaemonRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(rec.protocol_version, 0);
+        assert!(!rec.protocol_compatible());
+        assert!(rec.vm_processes.is_empty());
     }
 
     #[test]
@@ -631,6 +689,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: "wsb:x".to_string(),
             ready: true,
+            protocol_version: IPC_PROTOCOL_VERSION,
             vm_processes,
         }
     }
@@ -877,6 +936,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: active.to_string(),
             ready: true,
+            protocol_version: IPC_PROTOCOL_VERSION,
             vm_processes,
         }
     }
@@ -1005,6 +1065,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: "wsb:x".to_string(),
             ready: true,
+            protocol_version: IPC_PROTOCOL_VERSION,
             vm_processes: Vec::new(),
         };
         assert!(daemon_alive(&rec));
@@ -1023,6 +1084,7 @@ mod tests {
             nonce: "n".to_string(),
             active_sandbox_id: "wsb:x".to_string(),
             ready: true,
+            protocol_version: IPC_PROTOCOL_VERSION,
             vm_processes: Vec::new(),
         };
         assert!(!daemon_alive(&rec));

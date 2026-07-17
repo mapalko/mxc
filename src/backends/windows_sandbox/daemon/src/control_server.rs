@@ -14,7 +14,8 @@ use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::time::timeout;
 
 use windows_sandbox_lifecycle::bridge::{
-    reconnect_data_streams, stream_exec_on_guest, write_exit_frame, GuestConnection,
+    host_watchdog_deadline, reconnect_data_streams, stream_exec_on_guest, write_exit_frame,
+    GuestConnection, HOST_WATCHDOG_GRACE,
 };
 use windows_sandbox_lifecycle::control_plane::{
     IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_EXEC, IPC_PING, IPC_STOP,
@@ -331,7 +332,39 @@ async fn handle_exec(
     drop(permit);
 
     let exec_id = format!("exec-{}", EXEC_COUNTER.fetch_add(1, Ordering::Relaxed));
-    match stream_exec_on_guest(&mut conn, &exec_id, &req, &mut reader, &mut writer).await {
+
+    // Host-side watchdog: a frozen-but-alive guest (never sends Exit, never
+    // closes its streams) would otherwise wedge the single-flight slot forever.
+    // `None` == infinite budget (`timeout_ms == u32::MAX`), as in one-shot.
+    let watchdog = host_watchdog_deadline(req.timeout_ms, HOST_WATCHDOG_GRACE);
+    let stream_fut = stream_exec_on_guest(&mut conn, &exec_id, &req, &mut reader, &mut writer);
+    let stream_result = match watchdog {
+        Some(deadline) => match timeout(deadline, stream_fut).await {
+            Ok(result) => result,
+            Err(_) => {
+                // Watchdog fired: the guest connection is no longer trustworthy,
+                // so mark the slot Unusable and hand the client a terminal exit
+                // frame (its read has no deadline once streaming starts).
+                let msg = format!(
+                    "guest did not report completion within the host watchdog ({}ms guest \
+                     timeout + {}s grace); the sandbox may be frozen",
+                    req.timeout_ms,
+                    HOST_WATCHDOG_GRACE.as_secs()
+                );
+                eprintln!("[wsb-daemon] exec {exec_id}: {msg}");
+                let released =
+                    restore_and_release_guest_slot(slot, GuestSlot::Unusable(msg.clone()));
+                if let Err(e) = write_released_exit_frame(&mut writer, released, -1, &msg).await {
+                    eprintln!(
+                        "[wsb-daemon] exec {exec_id}: failed to send watchdog exit frame: {e:#}"
+                    );
+                }
+                return Ok(());
+            }
+        },
+        None => stream_fut.await,
+    };
+    match stream_result {
         Ok(outcome) => {
             let reconnect =
                 reconnect_data_streams(&mut conn, addr, outcome.control_residual, guest_nonce)
