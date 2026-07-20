@@ -16,7 +16,10 @@
 //! `experimental_raw` via `deserialize_config<C>`, and asserts
 //! `sandbox_id_required` for non-provision phases.
 
+use std::collections::HashMap;
+
 use serde::de::DeserializeOwned;
+use serde_json::value::RawValue;
 use serde_json::Value;
 
 use crate::config_deserialize;
@@ -91,6 +94,12 @@ pub struct ParsedStateAwareRequest {
     /// `{ <backend_key>: { <phase_name>: <typed-config>, ... }, ... }`.
     /// `deserialize_config<C>` navigates the two layers.
     pub experimental_raw: Option<Value>,
+    /// Full DECODED request text, retained so `deserialize_config<C>` can
+    /// deserialize the `experimental.<backend>.<phase>` sub-slice positionally
+    /// and report typed errors with whole-file (line, column) coordinates —
+    /// parity with base-config errors. `None` disables the positional path and
+    /// falls back to the value-based `experimental_raw` deserialize.
+    pub source_text: Option<Box<str>>,
 }
 
 impl ParsedStateAwareRequest {
@@ -106,6 +115,9 @@ impl ParsedStateAwareRequest {
         backend_key: &str,
         phase_name: &str,
     ) -> Result<Option<C>, MxcError> {
+        // Presence gate over the parsed value tree. Cheap, and preserves the
+        // established "backend key or phase key absent => None" behavior
+        // regardless of whether the positional path below is available.
         let Some(exp) = self.experimental_raw.as_ref() else {
             return Ok(None);
         };
@@ -115,12 +127,41 @@ impl ParsedStateAwareRequest {
         let Some(phase_value) = backend_obj.get(phase_name) else {
             return Ok(None);
         };
+
+        let prefix = format!("experimental.{backend_key}.{phase_name}");
+
+        // Preferred path: deserialize the phase config directly from its
+        // sub-slice of the retained source text so typed errors carry
+        // whole-file line/column, matching base-config diagnostics. Any failure
+        // to locate the sub-slice falls through to the value-based path so a
+        // would-be typed error is never turned into a navigation panic.
+        if let Some(source_text) = self.source_text.as_deref() {
+            if let Some((fragment, fragment_offset)) =
+                locate_phase_fragment(source_text, backend_key, phase_name)
+            {
+                return match config_deserialize::from_str::<C>(fragment) {
+                    Ok(config) => Ok(Some(config)),
+                    Err(error) => {
+                        let error = config_deserialize::remap_error_to_source(
+                            error,
+                            fragment,
+                            fragment_offset,
+                            source_text,
+                        );
+                        Err(MxcError::malformed_request(
+                            error.with_prefix(&prefix).to_string(),
+                        ))
+                    }
+                };
+            }
+        }
+
+        // Fallback: value-based deserialize. A `serde_json::Value` carries no
+        // source offsets, so these errors keep only the JSON-path prefix (the
+        // prior behavior) — no regression.
         config_deserialize::from_value_ref(phase_value)
             .map(Some)
-            .map_err(|error| {
-                let prefix = format!("experimental.{backend_key}.{phase_name}");
-                MxcError::malformed_request(error.with_prefix(&prefix).to_string())
-            })
+            .map_err(|error| MxcError::malformed_request(error.with_prefix(&prefix).to_string()))
     }
 
     /// Returns the `sandbox_id` for non-provision phases. Surfaces a missing
@@ -131,6 +172,32 @@ impl ParsedStateAwareRequest {
             MxcError::malformed_request(format!("phase {} requires a sandboxId", self.phase))
         })
     }
+}
+
+/// Navigate the retained request text to the `experimental.<backend>.<phase>`
+/// sub-slice, returning the fragment (borrowed from `source_text`) and its byte
+/// offset within `source_text`.
+///
+/// Each layer is re-parsed as a map of borrowed [`RawValue`]s, so the returned
+/// fragment is a genuine sub-slice of `source_text` whose byte offset is the
+/// pointer delta. Returns `None` when any navigation step fails or the located
+/// fragment is not contained within `source_text` (mirroring the fail-closed
+/// containment check used by the base-config source-span logic), so the caller
+/// falls back to the value-based path rather than fabricating an offset.
+fn locate_phase_fragment<'a>(
+    source_text: &'a str,
+    backend_key: &str,
+    phase_name: &str,
+) -> Option<(&'a str, usize)> {
+    let top: HashMap<&str, &RawValue> = serde_json::from_str(source_text).ok()?;
+    let experimental = top.get("experimental")?;
+    let backends: HashMap<&str, &RawValue> = serde_json::from_str(experimental.get()).ok()?;
+    let backend = backends.get(backend_key)?;
+    let phases: HashMap<&str, &RawValue> = serde_json::from_str(backend.get()).ok()?;
+    let fragment = phases.get(phase_name)?.get();
+
+    let offset = (fragment.as_ptr() as usize).checked_sub(source_text.as_ptr() as usize)?;
+    (offset.checked_add(fragment.len())? <= source_text.len()).then_some((fragment, offset))
 }
 
 /// Public bridge between parser and dispatcher.
@@ -176,6 +243,25 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: exp,
+            source_text: None,
+        }
+    }
+
+    /// Build a request from full request text, populating both `experimental_raw`
+    /// (the presence gate) and `source_text` (the positional path) the way the
+    /// real parser does — so `deserialize_config` exercises the whole-file
+    /// coordinate translation.
+    fn parsed_with_source(source_text: &str, phase: Phase) -> ParsedStateAwareRequest {
+        let full: Value = serde_json::from_str(source_text).expect("valid JSON");
+        let experimental_raw = full.get("experimental").cloned();
+        ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase,
+            containment: None,
+            sandbox_id: None,
+            correlation_vector: None,
+            experimental_raw,
+            source_text: Some(source_text.to_owned().into_boxed_str()),
         }
     }
 
@@ -241,6 +327,105 @@ mod tests {
         assert!(
             err.message.contains("experimental.isolation_session.start"),
             "expected the complete subtree path, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("missing field `configuration_id`"),
+            "expected the missing field, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn deserialize_config_reports_whole_file_line_for_typed_error() {
+        // The offending `configuration_id` value sits on whole-file line 5.
+        let source_text = "\
+{
+  \"experimental\": {
+    \"isolation_session\": {
+      \"start\": {
+        \"configuration_id\": 42
+      }
+    }
+  }
+}";
+        let parsed = parsed_with_source(source_text, Phase::Start);
+
+        let err = parsed
+            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .unwrap_err();
+
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message
+                .contains("experimental.isolation_session.start.configuration_id"),
+            "expected the full subtree path, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("line 5"),
+            "expected whole-file line 5, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn deserialize_config_whole_file_line_is_computed_not_hardcoded() {
+        // Same shape as above, shifted down by two leading fields so the
+        // offending value lands on whole-file line 7 instead of line 5.
+        let source_text = "\
+{
+  \"sandboxId\": \"iso:wxc-abcd1234\",
+  \"correlationVector\": \"cv.1\",
+  \"experimental\": {
+    \"isolation_session\": {
+      \"start\": {
+        \"configuration_id\": 42
+      }
+    }
+  }
+}";
+        let parsed = parsed_with_source(source_text, Phase::Start);
+
+        let err = parsed
+            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .unwrap_err();
+
+        assert!(
+            err.message
+                .contains("experimental.isolation_session.start.configuration_id"),
+            "expected the full subtree path, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("line 7"),
+            "expected whole-file line 7, got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("line 5"),
+            "location must be computed, not hardcoded, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn deserialize_config_falls_back_to_path_only_without_source_text() {
+        // With no retained source text the value-based path is used: the typed
+        // error still carries the full path prefix (prior behavior), no panic.
+        let exp = json!({
+            "isolation_session": { "start": { "wrong_field": 42 } }
+        });
+        let parsed = parsed_with_experimental(Some(exp), Phase::Start);
+
+        let err = parsed
+            .deserialize_config::<DummyStartConfig>("isolation_session", "start")
+            .unwrap_err();
+
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("experimental.isolation_session.start"),
+            "expected the subtree path in the fallback path, got: {}",
             err.message
         );
         assert!(

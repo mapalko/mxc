@@ -1710,6 +1710,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let err = command_override_context_for_state_aware(&parsed, true).unwrap_err();

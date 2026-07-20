@@ -496,6 +496,7 @@ mod tests {
             sandbox_id: sandbox_id.map(String::from),
             correlation_vector: None,
             experimental_raw: exp,
+            source_text: None,
         }
     }
 
@@ -678,6 +679,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::UnsupportedPhase);
@@ -692,6 +694,7 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         let err = run_state_aware(p, false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
@@ -706,6 +709,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-abcd1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         assert_eq!(
             resolve_backend(&p).unwrap(),
@@ -722,6 +726,7 @@ mod tests {
             sandbox_id: Some("wsb:deadbeef".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         assert_eq!(
             resolve_backend(&p).unwrap(),
@@ -738,6 +743,7 @@ mod tests {
             sandbox_id: Some("unknownxyz:abc".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
@@ -752,6 +758,7 @@ mod tests {
             sandbox_id: Some("no-colon".into()),
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);

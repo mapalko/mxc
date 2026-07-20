@@ -1261,6 +1261,10 @@ fn convert_wire_state_aware(
         sandbox_id,
         correlation_vector,
         experimental_raw,
+        // Retain the decoded request text so the dispatcher can deserialize each
+        // `experimental.<backend>.<phase>` sub-slice positionally and report
+        // typed errors with whole-file line/column (parity with base config).
+        source_text: Some(json.to_owned().into_boxed_str()),
     })
 }
 

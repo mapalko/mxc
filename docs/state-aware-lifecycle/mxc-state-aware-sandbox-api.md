@@ -1095,8 +1095,10 @@ state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`)
 are extracted alongside the `ExecutionRequest` and bundled into a
 `ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
 Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
-experimental_raw: Option<serde_json::Value> }` — that the dispatcher consumes
-(§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
+experimental_raw: Option<serde_json::Value>, source_text: Option<Box<str>> }` —
+that the dispatcher consumes (§9.3). `source_text` retains the decoded request
+text so per-backend per-phase config errors can be reported with whole-file
+source location (§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
 are exposed to the dispatch layer; the wire types are an implementation detail of
 the parser and schema generation.
 
@@ -1448,7 +1450,13 @@ prefix) or `malformed_id` (no prefix structure) per §8.
 `Result<Option<C>, MxcError>`: it navigates the wire `experimental.<backend_key>.<phase_name>`
 JSON value and deserialises it into `C` when present, returns `Ok(None)` when absent,
 and surfaces malformed JSON as `malformed_request`. The dispatcher passes
-`B::BACKEND_KEY` so each backend reads from its own slot.
+`B::BACKEND_KEY` so each backend reads from its own slot. Typed errors carry the
+complete `experimental.<backend>.<phase>.<field>` JSON path **and** whole-file
+source location (line/column), at parity with base-config errors: the phase-config
+sub-slice is deserialised positionally out of the retained request text and its
+fragment-local serde location is translated back to whole-file coordinates. If the
+sub-slice cannot be located, deserialisation falls back to the value-based path,
+which still reports the JSON path (without a source location).
 `sandbox_id_required()` enforces that non-provision phases carry a `sandboxId`,
 returning `&str` on success or `malformed_request` on absence. `validate_exec_common`
 is a free function in `validator.rs` that checks cross-backend per-phase invariants
