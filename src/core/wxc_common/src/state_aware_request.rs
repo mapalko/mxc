@@ -19,6 +19,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::config_deserialize;
 use crate::models::{ContainmentBackend, ExecutionRequest};
 use crate::mxc_error::MxcError;
 
@@ -114,15 +115,11 @@ impl ParsedStateAwareRequest {
         let Some(phase_value) = backend_obj.get(phase_name) else {
             return Ok(None);
         };
-        // Deserialize directly from the borrowed `&Value` — no need to clone
-        // the (potentially large) backend config subtree first.
-        <C as serde::Deserialize>::deserialize(phase_value)
+        config_deserialize::from_value_ref(phase_value)
             .map(Some)
-            .map_err(|e| {
-                MxcError::malformed_request(format!(
-                    "invalid config at experimental.{}.{}: {}",
-                    backend_key, phase_name, e
-                ))
+            .map_err(|error| {
+                let prefix = format!("experimental.{backend_key}.{phase_name}");
+                MxcError::malformed_request(error.with_prefix(&prefix).to_string())
             })
     }
 
@@ -146,6 +143,7 @@ pub enum MxcRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::IsolationSessionConfig;
     use crate::mxc_error::MxcErrorCode;
     use serde::Deserialize;
     use serde_json::json;
@@ -153,6 +151,21 @@ mod tests {
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct DummyStartConfig {
         configuration_id: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
+    struct ArrayStartConfig {
+        port_mappings: Vec<ArrayPortMapping>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
+    struct ArrayPortMapping {
+        windows_port: u16,
+        container_port: u16,
     }
 
     fn parsed_with_experimental(exp: Option<Value>, phase: Phase) -> ParsedStateAwareRequest {
@@ -225,6 +238,72 @@ mod tests {
             .deserialize_config::<DummyStartConfig>("isolation_session", "start")
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("experimental.isolation_session.start"),
+            "expected the complete subtree path, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("missing field `configuration_id`"),
+            "expected the missing field, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn deserialize_config_reports_complete_array_element_path() {
+        let exp = json!({
+            "wslc": {
+                "start": {
+                    "portMappings": [
+                        {
+                            "windowsPort": "8080",
+                            "containerPort": 80
+                        }
+                    ]
+                }
+            }
+        });
+        let parsed = parsed_with_experimental(Some(exp), Phase::Start);
+
+        let error = parsed
+            .deserialize_config::<ArrayStartConfig>("wslc", "start")
+            .unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            error
+                .message
+                .contains("experimental.wslc.start.portMappings[0].windowsPort"),
+            "expected complete array element path, got: {}",
+            error.message
+        );
+        assert!(error.message.contains("expected u16"));
+    }
+
+    #[test]
+    fn deserialize_config_redacts_secret_values() {
+        let exp = json!({
+            "isolation_session": {
+                "start": {
+                    "user": {
+                        "upn": "alice@contoso.com",
+                        "wamToken": 123456789
+                    }
+                }
+            }
+        });
+        let parsed = parsed_with_experimental(Some(exp), Phase::Start);
+
+        let error = parsed
+            .deserialize_config::<IsolationSessionConfig>("isolation_session", "start")
+            .unwrap_err();
+
+        assert!(error
+            .message
+            .contains("experimental.isolation_session.start.user.wamToken"));
+        assert!(error.message.contains("invalid secret value"));
+        assert!(!error.message.contains("123456789"));
     }
 
     #[test]

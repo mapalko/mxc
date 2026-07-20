@@ -657,6 +657,12 @@ mod tests {
         let p = parsed(Phase::Start, Some("typed:abc"), Some(exp));
         let err = dispatch_state_aware(&mut b, p, false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            err.message.contains("experimental.typed_stub.start"),
+            "expected envelope-ready error path, got: {}",
+            err.message
+        );
+        assert_eq!(b.captured_start_config.into_inner(), None);
     }
 
     // ---------- run_state_aware / resolve_backend ----------
